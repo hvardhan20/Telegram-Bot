@@ -1,14 +1,12 @@
 """
 Author: Harshavardhan
 """
-from telegram.ext import Updater, InlineQueryHandler, CommandHandler, MessageHandler, Filters, ConversationHandler
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler
 import telegram
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
-import requests
-import logging
 import os
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
+import logging
 import cv2
-from skimage.io import imread
 from skimage.transform import resize
 from keras.applications.imagenet_utils import decode_predictions
 from tensorflow.python.keras.backend import set_session
@@ -17,6 +15,7 @@ import keras
 import ctypes
 import webbrowser as wb
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 import absl.logging
 from email.mime.multipart import MIMEMultipart
@@ -24,10 +23,18 @@ from email.mime.text import MIMEText
 from email import encoders
 from email.mime.base import MIMEBase
 import smtplib
+import time
+import joblib
+import json
+import requests
+
 
 # GLOBAL VARIABLES
-BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE'
+BOT_TOKEN = '938059809:AAGbZ0bub6QM-LoRaesWR585TEOUxw1w_YY'
+WEATHER_KEY = '694a0650817a49655d2b7934ecf1aa03'
 BOT_CHAT_ID = None  # Bot chat ID is no longer needed for starting the bot. Its dynamically picked
+# BOT_TOKEN = '918870404:AAGylpk_4euuNUUMidmVGI3csLBslhxJiwE' # shyam token
+
 
 # MODEL RELATED
 MODEL = None
@@ -37,7 +44,10 @@ SESS = None
 INIT = None
 MODEL_TO_FETCH = 'nasnetlarge'
 
+
+
 # EMAIL RELATED
+RECIPIENT, ASK_SUBJECT, ASK_MESSAGE, ASK_ATTACHMENTS, GET_ATTACHMENTS, = range(5)
 SMTP_HOST = 'smtp-mail.outlook.com'
 SMTP_PORT = 587
 CON = None
@@ -47,6 +57,18 @@ RECIPIENT_ADDRESS = None
 SUBJECT = None
 MESSAGE = None
 ATTACHMENTS = None
+
+
+# AIRBNB GLOBALS
+AIRBNB_PARAMS = {}
+AIRBNB_MODEL = None
+NEIGHBOURHOOD, ROOM_TYPE, MINIMUM_NIGHTS = range(3)
+
+# SEATTLE GLOBALS
+SEATTLE_MODEL = None
+SEATTLE_PARAMS = {}
+SEATTLE_DF_DICT = {}
+INCIDENT_TYPE, DISTRICT_SECTOR = range(2)
 
 # LOGGING
 logging.root.removeHandler(absl.logging._absl_handler)
@@ -70,7 +92,6 @@ def login_email():
     logger.info('Logging into mail server')
     global CON, SMTP_HOST, SMTP_PORT, FROM_ADDRESS, FROM_ADDRESS_PASS
     if not CON:
-        import time
         start = time.time()
         CON = smtplib.SMTP(host=SMTP_HOST, port=SMTP_PORT)
         logger.info(f'Time taken to login is {time.time() - start} Secs')
@@ -85,42 +106,41 @@ def msg_handler(update, context):
     text = update.message.text
     global BOT_CHAT_ID
     BOT_CHAT_ID = str(update.effective_chat.id)
-    text_1 = 'a'
     if text == 'Lock' or text == 'lock':
         ctypes.windll.user32.LockWorkStation()
 
     elif text.lower() in ['hello', 'hey', 'hi', 'hola', 'yo', 'heylo']:
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"{text.capitalize()}! My name is {update.effective_message.bot.first_name}")
 
-    elif text.lower() == 'facebook' and text_1 != text.lower():
+    elif text.lower() == 'facebook':
         wb.open('www.facebook.com')
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened Facebook")
 
-    elif text.lower() == 'google' and text_1 != text.lower():
+    elif text.lower() == 'google':
         wb.open('www.google.com')
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened Google")
 
-    elif text.lower() == 'youtube' and text_1 != text.lower():
+    elif text.lower() == 'youtube':
         wb.open('www.youtube.com')
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened Youtube")
 
-    elif text.lower() == 'github' and text_1 != text.lower():
+    elif text.lower() == 'github':
         wb.open('www.github.com')
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened Github")
 
-    elif text.lower() == 'quora' and text_1 != text.lower():
+    elif text.lower() == 'quora':
         wb.open('www.quora.com')
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened Quora")
 
-    elif text.lower() == 'linkedin' and text_1 != text.lower():
+    elif text.lower() == 'linkedin':
         wb.open('www.linkedin.com')
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened LinkedIn")
 
-    elif text.lower() == 'elearning' and text_1 != text.lower():
+    elif text.lower() == 'elearning':
         wb.open('https://elearning.utdallas.edu/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1')
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened E-learning")
 
-    elif text.lower() == 'balc' and text_1 != text.lower():
+    elif text.lower() == 'balc':
         logger.info("Chose one to demonstrate:")
         logger.info("1. Airbnb Prediction")
         logger.info("2. Seattle Police PD Prediction")
@@ -181,7 +201,7 @@ def img_handler(update, context):
 def cancel(update, context):
     user = update.message.from_user
     logger.info("User %s canceled the conversation.", user.first_name)
-    update.message.reply_text('Sending E-mail cancelled',
+    update.message.reply_text('Conversation ended',
                               reply_markup=ReplyKeyboardRemove())
 
     return ConversationHandler.END
@@ -227,7 +247,7 @@ def email_message(update, context):
     #         'Failed to send message')
     reply_keyboard = [['Yes', 'No']]
     update.message.reply_text(
-            'Do you want to attach some files?', reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True))
+            'Do you want to attach some files?', reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
     return ASK_ATTACHMENTS
 
 
@@ -275,6 +295,7 @@ def email_attachments(update, context):
 
 
 def send_email(files: 'dict' = None) -> 'bool':
+    login_email()
     global FROM_ADDRESS, RECIPIENT_ADDRESS, SUBJECT, MESSAGE, CON
     msg = MIMEMultipart()
     msg['From'] = FROM_ADDRESS
@@ -294,40 +315,150 @@ def send_email(files: 'dict' = None) -> 'bool':
     try:
         CON.send_message(msg)
         CON.quit()
+        CON = None
         return True
     except Exception as e:
-        logger.info(e)
+        logger.error(e)
         return False
 
-
-RECIPIENT, ASK_SUBJECT, ASK_MESSAGE, ASK_ATTACHMENTS, GET_ATTACHMENTS, = range(5)
 
 # COMMAND HANDLERS FROM HERE
 
 
+def neighbourhood(update, context):
+    global AIRBNB_PARAMS
+    AIRBNB_PARAMS['neighbourhood_group'] = update.message.text
+    reply_keyboard = [
+        ['Private room', 'Shared room'],
+        ['Entire home/apt']
+    ]
+    update.message.reply_text(
+        'What kind of room are you looking for?', reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+
+    return ROOM_TYPE
+
+
+def room_type(update, context):
+    global AIRBNB_PARAMS
+    AIRBNB_PARAMS['room_type'] = update.message.text
+    update.message.reply_text(
+        'How many nights are you planning on staying?')
+
+    return MINIMUM_NIGHTS
+
+
+def minimum_nights(update, context):
+    global AIRBNB_PARAMS
+    AIRBNB_PARAMS['minimum_nights'] = [update.message.text]
+    result = predict_airbnb()
+    update.message.reply_text(result)
+    return ConversationHandler.END
+
+
+def predict_airbnb():
+    global AIRBNB_MODEL, AIRBNB_PARAMS
+    neighbourhood_mapping = {}
+    neighbourhood_mapping['Brooklyn'], neighbourhood_mapping['Manhattan'], neighbourhood_mapping['Queens'],\
+    neighbourhood_mapping['Staten Island'], neighbourhood_mapping['Bronx'] = range(5)
+    room_type_mapping = {}
+    room_type_mapping['Private room'], room_type_mapping['Entire home/apt'], room_type_mapping['Shared room'] = range(3)
+    AIRBNB_PARAMS['neighbourhood_group'] = [neighbourhood_mapping[AIRBNB_PARAMS['neighbourhood_group']]]
+    AIRBNB_PARAMS['room_type'] = [room_type_mapping[AIRBNB_PARAMS['room_type']]]
+    airbnb_df = pd.DataFrame.from_dict(AIRBNB_PARAMS)
+    predictions = AIRBNB_MODEL.predict(airbnb_df)
+    logging.info(predictions)
+    return f"Your budget should be close to ${predictions[0]:.2f}"
+
+
 def airbnb_prediction(update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text="Doing airbnb prediction")
-    # TODO
+    reply_keyboard = [
+        ['Manhattan', 'Queens'],
+        ['Bronx', 'Brooklyn'],
+        ['Staten Island']
+    ]
+    update.message.reply_text(
+        'Which neighbourhood are you looking to live in?', reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True))
+    return NEIGHBOURHOOD
+
+
+def incident_type(update, context):
+    global SEATTLE_PARAMS
+    SEATTLE_PARAMS['incident_type'] = update.message.text
+    reply_keyboard = [
+        ['D', 'E', 'F', 'J', 'K'],
+        ['L', 'M', 'N', 'Q', 'R'],
+        ['S', 'U', 'W', 'Other']
+    ]
+    update.message.reply_text(
+        'Which sector was that in?',
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return DISTRICT_SECTOR
+
+
+def district_sector(update, context):
+    global SEATTLE_PARAMS
+    SEATTLE_PARAMS['district_sector'] = update.message.text
+    result = predict_seattle()
+    update.message.reply_text(
+        result)
+    return ConversationHandler.END
+
+
+
+def predict_seattle():
+    global SEATTLE_PARAMS, SEATTLE_DF_DICT, SEATTLE_MODEL
+    incident = None
+    sector = None
+    for key, value in SEATTLE_DF_DICT.items():
+        col_to_check = key.split('_')[1]
+        if SEATTLE_PARAMS['incident_type'].lower() in col_to_check.lower():
+            SEATTLE_DF_DICT[key] = 1
+            incident = col_to_check
+        if SEATTLE_PARAMS['district_sector'] == col_to_check:
+            SEATTLE_DF_DICT[key] = 1
+            sector = col_to_check
+    seattle_df = pd.DataFrame.from_dict(SEATTLE_DF_DICT)
+    predictions = SEATTLE_MODEL.predict(seattle_df)
+    logging.info(f'Prediction is {predictions}')
+    pred_val = str(predictions[0][0])
+    hours, mins = pred_val.split('.')
+    return f"{incident} incident(s) in Sector {sector} is going to take {hours} hours {(float('0.'+mins)*60):.1f} minutes to be cleared"
 
 
 def seattle_police_prediction(update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text="Doing Seattle PD prediction")
-    # TODO
+    reply_keyboard = [
+        ['Theft', 'Residential Burglaries'],
+        ['Traffic related', 'Suspicious Circumstances'],
+        ['Other']
+    ]
+    update.message.reply_text(
+        'Which type of incident is it?',
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return INCIDENT_TYPE
 
 
 def text_analytics(update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text="Doing Text analytics")
-    # TODO
+    images_dir = 'text_analytics_images'
+    for image in os.listdir(images_dir):
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(images_dir+'/'+image, 'rb'))
 
 
-def main():
-    updater = Updater(token=BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+def image_classification(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Send me an image")
+
+
+def load_handlers():
+    handlers = []
     email_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(Filters.regex('^(email|Email|E-mail|e-mail)$'), send_to)], # Triggers sending an Email conversation
+        entry_points=[MessageHandler(Filters.regex('^(email|Email|E-mail|e-mail)$'), send_to)],
+        # Triggers sending an Email conversation
 
         states={
-            RECIPIENT: [MessageHandler(Filters.regex("(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$)"), to_address)],
+            RECIPIENT: [
+                MessageHandler(Filters.regex("(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$)"), to_address)],
 
             ASK_SUBJECT: [MessageHandler(Filters.text, email_subject)],
 
@@ -335,19 +466,77 @@ def main():
 
             ASK_ATTACHMENTS: [MessageHandler(Filters.text, ask_attachments)],
 
-            GET_ATTACHMENTS: [MessageHandler(Filters.document | Filters.photo | Filters.video | Filters.audio | Filters.contact, email_attachments)]
+            GET_ATTACHMENTS: [
+                MessageHandler(Filters.document | Filters.photo | Filters.video | Filters.audio | Filters.contact,
+                               email_attachments)]
         },
 
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+    handlers.append(email_conv_handler)
 
+    airbnb_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('airbnb_prediction', airbnb_prediction)],
+
+        states={
+            NEIGHBOURHOOD: [
+                MessageHandler(Filters.text, neighbourhood)],
+
+            ROOM_TYPE: [MessageHandler(Filters.text, room_type)],
+
+            MINIMUM_NIGHTS: [MessageHandler(Filters.text, minimum_nights)]
+        },
+
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    handlers.append(airbnb_conv_handler)
+
+    seattle_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('seattle_police_prediction', seattle_police_prediction)],
+        states={
+            INCIDENT_TYPE: [
+                MessageHandler(Filters.text, incident_type)],
+
+            DISTRICT_SECTOR: [MessageHandler(Filters.text, district_sector)]
+        },
+
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    handlers.append(seattle_conv_handler)
+    handlers.append(MessageHandler(Filters.text, msg_handler))  # General text handler for greetings and BALC options
+    handlers.append(MessageHandler(Filters.photo, img_handler))  # Handler to filter photos for image classification
+    handlers.append(CommandHandler('text_analytics', text_analytics))
+    handlers.append(CommandHandler('image_classification', image_classification))
+    handlers.append(CommandHandler('weather', weather))
+    handlers.append(MessageHandler(Filters.location, location))
+    return handlers
+
+
+def location(update, context):
+    latitude = update.message.location.latitude
+    longitude = update.message.location.longitude
+    base_url = 'http://api.openweathermap.org/data/2.5/weather?'
+    url = base_url + "appid=" + WEATHER_KEY + "&lat=" + str(latitude) + "&lon="+str(longitude)
+    response = requests.get(url).json()
+    if response['cod'] == 200:
+        result = f"It's {response['weather'][0]['main']} with temperature at {((response['main']['temp']*9/5)-459.67):.2f} °F in {response['name']}"
+    update.message.reply_text(
+        result)
+
+
+def weather(update, context):
+    location_keyboard = telegram.KeyboardButton(text="send_location", request_location=True)
+    update.message.reply_text(
+        'What',
+        reply_markup=ReplyKeyboardMarkup([[location_keyboard]], one_time_keyboard=True, resize_keyboard=True))
+
+
+def main():
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
     # Add all handlers to the dispatcher
-    dp.add_handler(email_conv_handler)  # Email conversation handler
-    dp.add_handler(MessageHandler(Filters.text, msg_handler))   # General text handler for greetings and BALC options
-    dp.add_handler(MessageHandler(Filters.photo, img_handler))  # Handler to filter photos for image classification
-    dp.add_handler(CommandHandler('airbnb_prediction', airbnb_prediction))
-    dp.add_handler(CommandHandler('seattle_police_prediction', seattle_police_prediction))
-    dp.add_handler(CommandHandler('text_analytics', text_analytics))
+    for handler in load_handlers(): # Adding all convo handlers
+        dp.add_handler(handler)
     dp.add_error_handler(error)
     logger.info('Polling for updates. Start chatting')
     updater.start_polling()
@@ -356,6 +545,7 @@ def main():
 
 def load_model():
     global MODEL, PREPROCESS_INPUT, GRAPH, SESS, INIT, MODEL_TO_FETCH
+    start = time.time()
     logger.info(f'Loading model {MODEL_TO_FETCH}')
     SESS = tf.Session()
     GRAPH = tf.get_default_graph()
@@ -366,11 +556,37 @@ def load_model():
     # MODEL = init_model(input_shape=(299, 299, 3), weights='imagenet', classes=1000)
     MODEL = init_model(input_shape=(331, 331, 3), weights='imagenet', classes=1000)
     logger.info(f'Loaded model {MODEL_TO_FETCH}')
+    logger.info(f'Time taken to load {MODEL_TO_FETCH} model is {time.time() - start} Secs')
+
+def load_seattle_model():
+    global SEATTLE_MODEL, SEATTLE_DF_DICT
+    start = time.time()
+    SEATTLE_MODEL = joblib.load('SeattleModel (1).pkl')
+    logger.info(f'Time taken to load seattle model is {time.time() - start} Secs')
+    columns = ['District/Sector_D', 'District/Sector_E', 'District/Sector_F', 'District/Sector_J'
+        , 'District/Sector_K', 'District/Sector_L', 'District/Sector_M',
+               'District/Sector_N', 'District/Sector_Other', 'District/Sector_Q'
+        , 'District/Sector_R', 'District/Sector_S', 'District/Sector_U'
+        , 'District/Sector_W', 'Initial Type Group_Other',
+               'Initial Type Group_RESIDENTIAL BURGLARIES'
+        , 'Initial Type Group_SUSPICIOUS CIRCUMSTANCES',
+               'Initial Type Group_THEFT', 'Initial Type Group_TRAFFIC RELATED CALLS']
+    SEATTLE_DF_DICT = {}
+    for col in columns:
+        SEATTLE_DF_DICT[col] = [0]
+
+
+def load_airbnb_model():
+    global AIRBNB_MODEL
+    start = time.time()
+    AIRBNB_MODEL = joblib.load('model (2).pkl')
+    logger.info(f'Time taken to load Airbnb model is {time.time() - start} Secs')
 
 
 if __name__ == '__main__':
-    logger.info('Clearing keras session')
-    keras.backend.clear_session()
-    login_email()
+    # logger.info('Clearing keras session')
+    # keras.backend.clear_session()
     load_model()
+    load_seattle_model()
+    load_airbnb_model()
     main()
