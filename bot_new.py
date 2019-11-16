@@ -70,6 +70,11 @@ SEATTLE_PARAMS = {}
 SEATTLE_DF_DICT = {}
 INCIDENT_TYPE, DISTRICT_SECTOR = range(2)
 
+# TEXT ANALYTICS
+BEST_PROFESSORS = range(1)
+BEST_CONCEPT, BEST_GRADE, BALANCE = None, None, None
+
+
 # LOGGING
 logging.root.removeHandler(absl.logging._absl_handler)
 logfile_handler = logging.FileHandler('./bot.log')
@@ -371,7 +376,6 @@ def predict_airbnb():
 
 
 def airbnb_prediction(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Doing airbnb prediction")
     reply_keyboard = [
         ['Manhattan', 'Queens'],
         ['Bronx', 'Brooklyn'],
@@ -427,7 +431,6 @@ def predict_seattle():
 
 
 def seattle_police_prediction(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Doing Seattle PD prediction")
     reply_keyboard = [
         ['Theft', 'Residential Burglaries'],
         ['Traffic related', 'Suspicious Circumstances'],
@@ -440,11 +443,30 @@ def seattle_police_prediction(update, context):
 
 
 def text_analytics(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Doing Text analytics")
-    images_dir = 'text_analytics_images'
-    for image in os.listdir(images_dir):
-        context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(images_dir+'/'+image, 'rb'))
+    # images_dir = 'text_analytics_images'
+    # for image in os.listdir(images_dir):
+    #     context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(images_dir+'/'+image, 'rb'))
+    reply_keyboard = [
+        ['Good concepts', 'Good grades'],
+        ['Balance of both']
+    ]
+    update.message.reply_text(
+        'Which kind of professors are you looking for?',
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return BEST_PROFESSORS
 
+
+def best_professors(update, context):
+    if 'concept' in update.message.text.lower():
+        result = '\n\u2022'.join(BEST_CONCEPT.tolist())
+    elif 'grade' in update.message.text.lower():
+        result = '\n\u2022'.join(BEST_GRADE.tolist())
+    elif 'balance' in update.message.text.lower():
+        result = '\n\u2022'.join(BALANCE.tolist())
+
+    update.message.reply_text(
+        f'For {update.message.text} you could choose the following professors:\n\u2022{result}')
+    return ConversationHandler.END
 
 def image_classification(update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text="Send me an image")
@@ -503,9 +525,19 @@ def load_handlers():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     handlers.append(seattle_conv_handler)
+
+    text_anal_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('text_analytics', text_analytics)],
+        states={
+            BEST_PROFESSORS: [
+                MessageHandler(Filters.text, best_professors)]
+        },
+
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    handlers.append(text_anal_conv_handler)
     handlers.append(MessageHandler(Filters.text, msg_handler))  # General text handler for greetings and BALC options
     handlers.append(MessageHandler(Filters.photo, img_handler))  # Handler to filter photos for image classification
-    handlers.append(CommandHandler('text_analytics', text_analytics))
     handlers.append(CommandHandler('image_classification', image_classification))
     handlers.append(CommandHandler('weather', weather))
     handlers.append(MessageHandler(Filters.location, location))
@@ -535,7 +567,7 @@ def main():
     updater = Updater(token=BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     # Add all handlers to the dispatcher
-    for handler in load_handlers(): # Adding all convo handlers
+    for handler in load_handlers():  # Adding all handlers
         dp.add_handler(handler)
     dp.add_error_handler(error)
     logger.info('Polling for updates. Start chatting')
@@ -583,10 +615,30 @@ def load_airbnb_model():
     logger.info(f'Time taken to load Airbnb model is {time.time() - start} Secs')
 
 
+def load_text_anal():
+    global BEST_CONCEPT, BEST_GRADE, BALANCE
+    df = pd.read_csv('responses.csv', encoding="ISO-8859-1")
+    df = df.drop(['Timestamp'], axis=1)
+    df['Grading_Score'] = df['Rate the Professor on basis of grading']
+    df['Concept_Score'] = df['Rate the Professor on basis of teaching']
+    df['Grading_Score'] = df['Grading_Score'].map({'Easy': 5, 'Average': 3, 'Very tough': 1})
+    df['Concept_Score'] = df['Concept_Score'].map({'Excellent': 5, 'Very Good': 3, 'Good': 1})
+    df = df.drop(['Rate the Professor on basis of grading', 'Rate the Professor on basis of teaching'], axis=1)
+    table = pd.pivot_table(df, values=['Grading_Score', 'Concept_Score'], index=['Professor Name'], aggfunc=np.average)
+    table['Balanced_Score'] = (table['Grading_Score'] + table['Concept_Score']) / 2
+    table.reset_index(level=0, inplace=True)
+    concept_data = table.sort_values(by=['Concept_Score'], ascending=False).head(5)
+    BEST_CONCEPT = concept_data['Professor Name']
+    grade_data = table.sort_values(by=['Grading_Score'], ascending=False).head(5)
+    BEST_GRADE = grade_data['Professor Name']
+    balance_data = table.sort_values(by=['Balanced_Score'], ascending=False).head(5)
+    BALANCE = balance_data['Professor Name']
+
 if __name__ == '__main__':
     # logger.info('Clearing keras session')
     # keras.backend.clear_session()
-    load_model()
-    load_seattle_model()
-    load_airbnb_model()
+    # load_model()
+    # load_seattle_model()
+    # load_airbnb_model()
+    load_text_anal()
     main()
