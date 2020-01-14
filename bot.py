@@ -28,6 +28,9 @@ import joblib
 import json
 import requests
 
+from fastai import *
+from fastai.vision import *
+from fastai.callbacks.hooks import *
 
 # GLOBAL VARIABLES
 BOT_TOKEN = '938059809:AAGbZ0bub6QM-LoRaesWR585TEOUxw1w_YY'
@@ -44,7 +47,7 @@ SESS = None
 INIT = None
 MODEL_TO_FETCH = 'nasnetlarge'
 
-
+FASTAI_MODEL = None
 
 # EMAIL RELATED
 RECIPIENT, ASK_SUBJECT, ASK_MESSAGE, ASK_ATTACHMENTS, GET_ATTACHMENTS, = range(5)
@@ -74,6 +77,8 @@ INCIDENT_TYPE, DISTRICT_SECTOR = range(2)
 BEST_PROFESSORS = range(1)
 BEST_CONCEPT, BEST_GRADE, BALANCE = None, None, None
 
+# MALARIA DETECTION
+ACCEPT_CELL_DETECT = range(1)
 
 # LOGGING
 logging.root.removeHandler(absl.logging._absl_handler)
@@ -146,18 +151,20 @@ def msg_handler(update, context):
         context.bot.send_message(chat_id=update.effective_chat.id, text=f"Opened E-learning")
 
     elif text.lower() == 'balc':
-        logger.info("Chose one to demonstrate:")
+        logger.info("Choose one to demonstrate:")
         logger.info("1. Airbnb Prediction")
         logger.info("2. Seattle Police PD Prediction")
         logger.info("3. Text Analytics UTD")
         logger.info("4. Image Classification")
+        logger.info("5. Malaria Detection")
 
         update.message.reply_text(
             'Choose one for a demo:\n\n'
             '/airbnb_prediction\n\n'
             '/seattle_police_prediction\n\n'
             '/text_analytics\n\n'
-            '/image_classification\n\n')
+            '/image_classification\n\n'
+            '/malaria_detection\n\n')
 
 
 def get_np_array(image_bytes):
@@ -192,6 +199,25 @@ def img_handler(update, context):
     file_path = context.bot.getFile(file_id).file_path
     file = telegram.File(file_id, bot=context.bot, file_path=file_path)
     image_bytes = file.download_as_bytearray()
+    image_np_array = get_np_array(image_bytes)
+    predictions = classify(image_np_array)[0]
+    if not predictions:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Couldn't figure that out. Try again later")
+        return
+    logger.info(predictions)
+    best_pred = ' '.join([word.capitalize() for word in predictions[0][1].replace('_', ' ').split()])
+    response = f'This is a {best_pred}. I am {predictions[0][2]*100:.2f}% confident'
+    context.bot.send_message(chat_id=update.effective_chat.id, text=response)
+
+
+def img_handler(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="I'll tell you what this is in a moment.")
+    photo_list = update.message['photo']
+    file_id = photo_list[len(photo_list) - 1]['file_id']
+    file_path = context.bot.getFile(file_id).file_path
+    file = telegram.File(file_id, bot=context.bot, file_path=file_path)
+    image_bytes = file.download_as_bytearray()
+    # image = file.download('sample.png')
     image_np_array = get_np_array(image_bytes)
     predictions = classify(image_np_array)[0]
     if not predictions:
@@ -468,6 +494,29 @@ def best_professors(update, context):
         f'For {update.message.text} you could choose the following professors:\n\u2022{result}')
     return ConversationHandler.END
 
+
+def malaria_detect_entry(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Send me an image of blood smear cell")
+
+    return ACCEPT_CELL_DETECT
+
+
+def detect_malaria(update, context):
+    global FASTAI_MODEL
+    context.bot.send_message(chat_id=update.effective_chat.id, text="I'll tell you if this is infected in a moment.")
+    photo_list = update.message['photo']
+    file_id = photo_list[len(photo_list) - 1]['file_id']
+    file_path = context.bot.getFile(file_id).file_path
+    file = telegram.File(file_id, bot=context.bot, file_path=file_path)
+    image = file.download('sample.png')
+    img = open_image('sample.png')
+    pred_class, b, c = FASTAI_MODEL.predict(img)
+    response = f'This is {pred_class}.'
+    context.bot.send_message(chat_id=update.effective_chat.id, text=response)
+
+    return ConversationHandler.END
+
+
 def image_classification(update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text="Send me an image")
 
@@ -536,6 +585,18 @@ def load_handlers():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     handlers.append(text_anal_conv_handler)
+
+    malaria_detect_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('malaria_detection', malaria_detect_entry)],
+        states={
+            ACCEPT_CELL_DETECT: [
+                MessageHandler(Filters.photo, detect_malaria)]
+        },
+
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    handlers.append(malaria_detect_conv_handler)
+
     handlers.append(MessageHandler(Filters.text, msg_handler))  # General text handler for greetings and BALC options
     handlers.append(MessageHandler(Filters.photo, img_handler))  # Handler to filter photos for image classification
     handlers.append(CommandHandler('image_classification', image_classification))
@@ -634,11 +695,26 @@ def load_text_anal():
     balance_data = table.sort_values(by=['Balanced_Score'], ascending=False).head(5)
     BALANCE = balance_data['Professor Name']
 
+
+def load_fastai_model():
+    global FASTAI_MODEL
+    img_dir = './cell_images/'
+    path = Path(img_dir)
+    data = ImageDataBunch.from_folder(path, train=".",
+                                      valid_pct=0.2,
+                                      ds_tfms=get_transforms(flip_vert=True, max_warp=0),
+                                      size=224, bs=64,
+                                      num_workers=0).normalize(imagenet_stats)
+    print('DATA IS ', data)
+    FASTAI_MODEL = create_cnn(data, models.resnet34, metrics=accuracy, model_dir="/tmp/model/").load('stage-2')
+
+
 if __name__ == '__main__':
     # logger.info('Clearing keras session')
     # keras.backend.clear_session()
-    # load_model()
-    # load_seattle_model()
-    # load_airbnb_model()
+    load_model()
+    load_seattle_model()
+    load_airbnb_model()
     load_text_anal()
+    load_fastai_model()
     main()
